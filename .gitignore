@@ -1,3 +1,4 @@
 /cmd/laracasts-dl/downloads/
 /cmd/laracasts-dl/.env
 .idea
+cmd/laracasts-dl/.env
