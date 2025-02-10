@@ -3,19 +3,22 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
-
 	"github.com/joho/godotenv"
-	"github.com/sajjadnwar0/laracasts-dl/internal/downloader"
-	"github.com/sajjanwar0/laracasts-dl/internal/config"
+	"github.com/sajjadanwar0/laracasts-dl/internal/downloader"
+	"os"
 )
 
 func main() {
-	// Define flags for different content types
-	seriesFlag := flag.String("s", "", "Series slug (leave empty to download all series)")
-	larabitFlag := flag.String("l", "", "Larabit slug (leave empty to download all larabits)")
-	topicFlag := flag.String("t", "", "Topic slug (leave empty to download all topics)")
-	teacherFlag := flag.String("teacher", "", "Teacher name for filtering bits (e.g., JeffreyWay)")
+	// Define flags
+	var larabitFlag, seriesFlag, topicFlag, teacherFlag string
+
+	// Set up flags without default values
+	flag.StringVar(&seriesFlag, "s", "", "Series slug (leave empty to download all series)")
+	flag.StringVar(&larabitFlag, "l", "", "Larabit slug (leave empty to download all larabits)")
+	flag.StringVar(&topicFlag, "t", "", "Topic slug (leave empty to download all topics)")
+	flag.StringVar(&teacherFlag, "teacher", "", "Teacher name for filtering bits (e.g., JeffreyWay)")
+
+	// Parse flags
 	flag.Parse()
 
 	// Load environment variables
@@ -32,13 +35,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// No flags provided
-	if *seriesFlag == "" && *larabitFlag == "" && *topicFlag == "" {
-		fmt.Println("Please provide at least one flag:")
+	// Check if any content type flag was specified
+	seriesSpecified := isFlagSpecified("s")
+	larabitSpecified := isFlagSpecified("l")
+	topicSpecified := isFlagSpecified("t")
+
+	if !seriesSpecified && !larabitSpecified && !topicSpecified {
+		fmt.Println("Please specify at least one content type to download:")
 		fmt.Println("  -s [slug]     : Download series (optional: specific series slug)")
-		fmt.Println("  -l [slug]     : Download larabits (optional: specific larabit slug)")
-		fmt.Println("  -t [slug]     : Download topics (optional: specific topic slug)")
-		fmt.Println("  -teacher name : Filter bits by teacher (e.g., -l -teacher JeffreyWay)")
 		os.Exit(1)
 	}
 
@@ -55,11 +59,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Process flags
-	if flag.Lookup("s").Value.String() != "" {
-		contentType := config.ContentTypes["s"]
-		if *seriesFlag != "" {
-			if err := dl.DownloadSeries(*seriesFlag); err != nil {
+	// Process series downloads
+	if seriesSpecified {
+		if seriesFlag != "" {
+			if err := dl.DownloadSeries(seriesFlag); err != nil {
 				fmt.Printf("Error downloading series: %v\n", err)
 			}
 		} else {
@@ -68,30 +71,15 @@ func main() {
 			}
 		}
 	}
+}
 
-	if flag.Lookup("l").Value.String() != "" {
-		contentType := config.ContentTypes["l"]
-		if *larabitFlag != "" {
-			if err := dl.DownloadBit(*larabitFlag); err != nil {
-				fmt.Printf("Error downloading larabit: %v\n", err)
-			}
-		} else {
-			if err := dl.DownloadAllBits(*teacherFlag); err != nil {
-				fmt.Printf("Error downloading larabits: %v\n", err)
-			}
+// isFlagSpecified checks if a flag was specified on the command line
+func isFlagSpecified(name string) bool {
+	found := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
 		}
-	}
-
-	if flag.Lookup("t").Value.String() != "" {
-		contentType := config.ContentTypes["t"]
-		if *topicFlag != "" {
-			if err := dl.DownloadTopic(*topicFlag); err != nil {
-				fmt.Printf("Error downloading topic: %v\n", err)
-			}
-		} else {
-			if err := dl.DownloadAllTopics(); err != nil {
-				fmt.Printf("Error downloading all topics: %v\n", err)
-			}
-		}
-	}
+	})
+	return found
 }

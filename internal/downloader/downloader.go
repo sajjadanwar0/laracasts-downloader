@@ -4,18 +4,23 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	_ "github.com/sajjadanwar0/laracasts-dl/internal/utils"
+	"github.com/sajjadanwar0/laracasts-dl/internal/vimeo"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	_ "strings"
 
-	"github.com/yourusername/laracasts-dl/internal/config"
+	"github.com/sajjadanwar0/laracasts-dl/internal/config"
 )
 
 type Downloader struct {
 	Client   *http.Client
+	Vimeo    *vimeo.Client
 	BasePath string
 }
 
@@ -25,8 +30,11 @@ func New() (*Downloader, error) {
 		return nil, err
 	}
 
+	client := &http.Client{Jar: jar}
+
 	return &Downloader{
-		Client:   &http.Client{Jar: jar},
+		Client:   client,
+		Vimeo:    vimeo.NewClient(client),
 		BasePath: "downloads",
 	}, nil
 }
@@ -69,7 +77,12 @@ func (d *Downloader) Login(email, password string) error {
 	if err != nil {
 		return fmt.Errorf("failed login request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			printBox("Failed to close body")
+		}
+	}(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -93,7 +106,12 @@ func (d *Downloader) getXSRFToken() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			printBox("Failed to close body")
+		}
+	}(resp.Body)
 
 	laracastsURL, _ := url.Parse(config.LaracastsBaseUrl)
 	cookies := d.Client.Jar.Cookies(laracastsURL)
@@ -110,10 +128,48 @@ func (d *Downloader) getXSRFToken() (string, error) {
 	return "", fmt.Errorf("XSRF token not found in cookies")
 }
 
+type Episode struct {
+	Title   string
+	VimeoId string
+	Number  int
+}
+
+func SanitizeFilename(filename string) string {
+	invalids := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"}
+	result := filename
+	for _, char := range invalids {
+		result = strings.ReplaceAll(result, char, "-")
+	}
+	return result
+}
+
+func (d *Downloader) downloadEpisode(slug string, episode Episode) error {
+	return d.DownloadEpisode("series", slug, episode)
+}
+
+func (d *Downloader) DownloadEpisode(contentType, slug string, episode Episode) error {
+	filename := fmt.Sprintf("%02d-%s.mp4", episode.Number, SanitizeFilename(episode.Title))
+	fullPath := filepath.Join(d.BasePath, contentType, slug, filename)
+
+	// Ensure the directory exists
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %v", err)
+	}
+
+	// Get video configuration
+	videoConfig, err := d.Vimeo.GetVideoConfig(episode.VimeoId)
+	if err != nil {
+		return fmt.Errorf("failed to get video config: %v", err)
+	}
+
+	// Download the video
+	return d.Vimeo.DownloadVideo(videoConfig, fullPath)
+}
+
 func (d *Downloader) ensureOutputDir(contentType, slug string) (string, error) {
 	outputDir := filepath.Join(d.BasePath, contentType, slug)
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create output directory: %v", err)
+		return "", err
 	}
 	return outputDir, nil
 }
