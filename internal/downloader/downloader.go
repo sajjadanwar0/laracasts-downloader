@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	_ "github.com/sajjadanwar0/laracasts-dl/internal/utils"
-	"github.com/sajjadanwar0/laracasts-dl/internal/vimeo"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -13,15 +11,31 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	_ "strings"
+	"time"
 
+	"github.com/sajjadanwar0/laracasts-dl/internal/cache"
 	"github.com/sajjadanwar0/laracasts-dl/internal/config"
+	"github.com/sajjadanwar0/laracasts-dl/internal/vimeo"
+)
+
+const (
+	MaxEpisodeWorkers = 15  // Concurrent episode downloads
+	JobBufferSize     = 200 // Buffer for job channel
+	ResultsBufferSize = 200 // Buffer for results channel
+
 )
 
 type Downloader struct {
 	Client   *http.Client
 	Vimeo    *vimeo.Client
 	BasePath string
+	Cache    *cache.Cache
+}
+
+type Episode struct {
+	Title   string
+	VimeoId string
+	Number  int
 }
 
 func New() (*Downloader, error) {
@@ -30,12 +44,39 @@ func New() (*Downloader, error) {
 		return nil, err
 	}
 
-	client := &http.Client{Jar: jar}
+	// Create absolute path for downloads
+	basePath, err := filepath.Abs("downloads")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get absolute path: %v", err)
+	}
+
+	// Create downloads directory
+	if err := os.MkdirAll(basePath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create downloads directory: %v", err)
+	}
+
+	// Initialize cache
+	newCache, err := cache.NewCache(basePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize cache: %v", err)
+	}
+
+	client := &http.Client{
+		Jar:     jar,
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			IdleConnTimeout:     90 * time.Second,
+			DisableCompression:  true,
+			MaxIdleConnsPerHost: 100,
+		},
+	}
 
 	return &Downloader{
 		Client:   client,
 		Vimeo:    vimeo.NewClient(client),
-		BasePath: "downloads",
+		BasePath: basePath,
+		Cache:    newCache,
 	}, nil
 }
 
@@ -43,7 +84,7 @@ func (d *Downloader) Login(email, password string) error {
 	printBox("Authenticating")
 
 	// Get initial page and XSRF token
-	xsrfToken, err := d.getXSRFToken()
+	token, err := d.getXSRFToken()
 	if err != nil {
 		return fmt.Errorf("failed to get XSRF token: %v", err)
 	}
@@ -69,7 +110,7 @@ func (d *Downloader) Login(email, password string) error {
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-XSRF-TOKEN", xsrfToken)
+	req.Header.Set("X-XSRF-TOKEN", token)
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("Referer", config.LaracastsBaseUrl)
 
@@ -89,7 +130,7 @@ func (d *Downloader) Login(email, password string) error {
 		return fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	fmt.Printf("> Logged in as %s\n", email)
+	fmt.Printf("✓ Logged in as %s\n", email)
 	return nil
 }
 
@@ -128,31 +169,18 @@ func (d *Downloader) getXSRFToken() (string, error) {
 	return "", fmt.Errorf("XSRF token not found in cookies")
 }
 
-type Episode struct {
-	Title   string
-	VimeoId string
-	Number  int
-}
+func (d *Downloader) downloadEpisode(seriesSlug string, episode Episode) error {
+	filename := fmt.Sprintf("%02d-%s.mp4", episode.Number, sanitizeFilename(episode.Title))
+	outputPath := filepath.Join(d.BasePath, "series", seriesSlug, filename)
 
-func SanitizeFilename(filename string) string {
-	invalids := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"}
-	result := filename
-	for _, char := range invalids {
-		result = strings.ReplaceAll(result, char, "-")
+	// Check if file already exists and is complete
+	if info, err := os.Stat(outputPath); err == nil && info.Size() > 0 {
+		// File exists and has content
+		return nil
 	}
-	return result
-}
-
-func (d *Downloader) downloadEpisode(slug string, episode Episode) error {
-	return d.DownloadEpisode("series", slug, episode)
-}
-
-func (d *Downloader) DownloadEpisode(contentType, slug string, episode Episode) error {
-	filename := fmt.Sprintf("%02d-%s.mp4", episode.Number, SanitizeFilename(episode.Title))
-	fullPath := filepath.Join(d.BasePath, contentType, slug, filename)
 
 	// Ensure the directory exists
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
@@ -163,19 +191,22 @@ func (d *Downloader) DownloadEpisode(contentType, slug string, episode Episode) 
 	}
 
 	// Download the video
-	return d.Vimeo.DownloadVideo(videoConfig, fullPath)
+	return d.Vimeo.DownloadVideo(videoConfig, outputPath)
 }
 
-func (d *Downloader) ensureOutputDir(contentType, slug string) (string, error) {
-	outputDir := filepath.Join(d.BasePath, contentType, slug)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return "", err
+func sanitizeFilename(filename string) string {
+	invalids := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"}
+	result := filename
+
+	for _, char := range invalids {
+		result = strings.ReplaceAll(result, char, "-")
 	}
-	return outputDir, nil
+
+	return strings.TrimSpace(result)
 }
 
 func printBox(text string) {
-	fmt.Println("====================================")
-	fmt.Println(text)
-	fmt.Println("====================================")
+	width := len(text) + 4
+	line := strings.Repeat("=", width)
+	fmt.Printf("\n%s\n  %s\n%s\n", line, text, line)
 }

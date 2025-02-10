@@ -2,58 +2,38 @@ package vimeo
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/schollz/progressbar/v3"
 	"io"
+	"math"
 	"net/http"
-	"os"
 	"os/exec"
-	"regexp"
-	"strconv"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/schollz/progressbar/v3"
 )
 
-// Client handles Vimeo video downloads
 type Client struct {
 	httpClient *http.Client
 }
 
-// NewClient creates a new Vimeo client
 func NewClient(httpClient *http.Client) *Client {
 	return &Client{
 		httpClient: httpClient,
 	}
 }
 
-// VideoConfig represents the Vimeo video configuration
-type VideoConfig struct {
-	Request struct {
-		Files struct {
-			Progressive []struct {
-				URL     string `json:"url"`
-				Quality string `json:"quality"`
-			} `json:"progressive"`
-			HLS struct {
-				DefaultCDN string `json:"default_cdn"`
-				Cdns       map[string]struct {
-					URL string `json:"url"`
-				} `json:"cdns"`
-			} `json:"hls"`
-		} `json:"files"`
-	} `json:"request"`
-}
-
-// GetVideoConfig fetches the video configuration from Vimeo
 func (c *Client) GetVideoConfig(vimeoId string) (*VideoConfig, error) {
 	configURL := fmt.Sprintf("https://player.vimeo.com/video/%s/config", vimeoId)
-	maxRetries := 3
+	maxRetries := MaxRetries
 	var lastErr error
 
 	headers := map[string]string{
-		"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+		"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 		"Accept":          "application/json",
 		"Accept-Language": "en-US,en;q=0.9",
 		"Referer":         "https://laracasts.com/",
@@ -61,12 +41,14 @@ func (c *Client) GetVideoConfig(vimeoId string) (*VideoConfig, error) {
 		"Sec-Fetch-Dest":  "empty",
 		"Sec-Fetch-Mode":  "cors",
 		"Sec-Fetch-Site":  "cross-site",
+		"Connection":      "keep-alive",
 	}
 
 	for i := 0; i < maxRetries; i++ {
 		req, err := http.NewRequest("GET", configURL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %v", err)
+			lastErr = err
+			continue
 		}
 
 		for k, v := range headers {
@@ -76,11 +58,13 @@ func (c *Client) GetVideoConfig(vimeoId string) (*VideoConfig, error) {
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			lastErr = err
+			time.Sleep(time.Second)
 			continue
 		}
 
 		body, err := io.ReadAll(resp.Body)
 		err = resp.Body.Close()
+
 		if err != nil {
 			lastErr = err
 			continue
@@ -88,12 +72,8 @@ func (c *Client) GetVideoConfig(vimeoId string) (*VideoConfig, error) {
 
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-			continue
-		}
-
-		// Check if response is HTML (error page)
-		if strings.Contains(string(body), "<html") {
-			lastErr = fmt.Errorf("received HTML instead of JSON response")
+			fmt.Printf("Response body: %s\n", string(body))
+			time.Sleep(time.Second)
 			continue
 		}
 
@@ -103,19 +83,25 @@ func (c *Client) GetVideoConfig(vimeoId string) (*VideoConfig, error) {
 			continue
 		}
 
+		// Debug output
+		fmt.Printf("\nVideo formats found for %s:\n", vimeoId)
+		fmt.Printf("Progressive: %d formats\n", len(config.Request.Files.Progressive))
+		fmt.Printf("HLS: %v\n", config.Request.Files.HLS.DefaultCDN != "")
+		fmt.Printf("DASH: %v\n", config.Request.Files.Dash.DefaultCDN != "")
+
 		return &config, nil
 	}
 
 	return nil, fmt.Errorf("failed after %d attempts: %v", maxRetries, lastErr)
 }
-
-// DownloadVideo downloads the video using the best available method
 func (c *Client) DownloadVideo(config *VideoConfig, outputPath string) error {
 	// Try progressive download first
 	if len(config.Request.Files.Progressive) > 0 {
+		fmt.Println("Available video formats:")
 		var bestURL string
 		var bestQuality int
 		for _, prog := range config.Request.Files.Progressive {
+			fmt.Printf("- Quality: %s, URL: available\n", prog.Quality)
 			quality := 0
 			_, err := fmt.Sscanf(prog.Quality, "%dp", &quality)
 			if err != nil {
@@ -128,201 +114,287 @@ func (c *Client) DownloadVideo(config *VideoConfig, outputPath string) error {
 		}
 
 		if bestURL != "" {
-			fmt.Printf("Downloading progressive stream (%dp)\n", bestQuality)
-			if err := c.downloadProgressiveVideo(bestURL, outputPath); err == nil {
-				return nil
-			}
+			fmt.Printf("\nDownloading progressive MP4 stream (%dp)\n", bestQuality)
+			return c.downloadWithChunks(bestURL, outputPath)
 		}
 	}
 
-	// Try HLS if progressive download is not available or failed
+	// Try HLS if progressive download is not available
 	if config.Request.Files.HLS.DefaultCDN != "" {
-		defaultCDN := config.Request.Files.HLS.DefaultCDN
-		if cdn, ok := config.Request.Files.HLS.Cdns[defaultCDN]; ok {
+		fmt.Println("\nTrying HLS stream...")
+		if cdn, ok := config.Request.Files.HLS.Cdns[config.Request.Files.HLS.DefaultCDN]; ok {
 			hlsURL := cdn.URL
 			if hlsURL != "" {
-				fmt.Printf("Downloading HLS stream\n")
-				return c.downloadWithFFmpeg(hlsURL, outputPath)
+				return c.downloadHLSVideo(hlsURL, outputPath)
+			}
+		}
+		fmt.Printf("Available CDNs: %v\n", config.Request.Files.HLS.Cdns)
+	}
+
+	// Try Dash stream if available
+	if config.Request.Files.Dash.DefaultCDN != "" {
+		fmt.Println("\nTrying DASH stream...")
+		if cdn, ok := config.Request.Files.Dash.Cdns[config.Request.Files.Dash.DefaultCDN]; ok {
+			dashURL := cdn.URL
+			if dashURL != "" {
+				return c.downloadDashVideo(dashURL, outputPath)
 			}
 		}
 	}
 
-	return fmt.Errorf("no suitable video URL found")
+	return fmt.Errorf("no suitable video URL found (tried Progressive, HLS, and DASH)")
 }
 
-// downloadProgressiveVideo downloads a direct video stream
-func (c *Client) downloadProgressiveVideo(url, outputPath string) error {
-	maxRetries := 3
-	var lastErr error
+func (c *Client) downloadDashVideo(url, outputPath string) error {
+	fmt.Printf("Downloading DASH stream: %s\n", filepath.Base(outputPath))
 
-	for i := 0; i < maxRetries; i++ {
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return fmt.Errorf("failed to create request: %v", err)
-		}
+	cmd := exec.Command("ffmpeg",
+		"-i", url,
+		"-c", "copy",
+		"-movflags", "+faststart",
+		"-y",
+		outputPath)
 
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			err := resp.Body.Close()
-			if err != nil {
-				return err
-			}
-
-			lastErr = fmt.Errorf("bad status: %s", resp.Status)
-			continue
-		}
-
-		out, err := os.Create(outputPath)
-		if err != nil {
-			err := resp.Body.Close()
-			if err != nil {
-				return err
-			}
-			return fmt.Errorf("failed to create output file: %v", err)
-		}
-
-		bar := progressbar.NewOptions64(
-			resp.ContentLength,
-			progressbar.OptionSetDescription("Downloading"),
-			progressbar.OptionShowBytes(true),
-			progressbar.OptionSetWidth(30),
-			progressbar.OptionShowCount(),
-		)
-
-		_, err = io.Copy(io.MultiWriter(out, bar), resp.Body)
-		err = resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		err = out.Close()
-		if err != nil {
-			return err
-		}
-
-		fmt.Println() // New line after progress bar
-		return nil
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ffmpeg failed: %v\nOutput: %s", err, stderr.String())
 	}
 
-	return fmt.Errorf("download failed after %d attempts: %v", maxRetries, lastErr)
+	return nil
 }
 
-// downloadWithFFmpeg downloads a video using FFmpeg
-func (c *Client) downloadWithFFmpeg(url, outputPath string) error {
-	fmt.Printf("Using FFmpeg to download: %s\n", url)
+func (c *Client) downloadHLSVideo(url, outputPath string) error {
+	fmt.Printf("Downloading HLS stream: %s\n", filepath.Base(outputPath))
 
 	cmd := exec.Command("ffmpeg",
 		"-i", url,
 		"-c", "copy",
 		"-bsf:a", "aac_adtstoasc",
 		"-movflags", "+faststart",
-		"-progress", "pipe:1",
 		"-y",
-		outputPath,
-	)
+		outputPath)
 
-	stdout, err := cmd.StdoutPipe()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ffmpeg failed: %v\nOutput: %s", err, stderr.String())
+	}
+
+	return nil
+}
+
+func (c *Client) getBestProgressiveURL(config *VideoConfig) (string, int) {
+	var bestURL string
+	var bestQuality int
+
+	for _, prog := range config.Request.Files.Progressive {
+		quality := 0
+		_, err := fmt.Sscanf(prog.Quality, "%dp", &quality)
+		if err != nil {
+			return "", 0
+		}
+		if quality > bestQuality {
+			bestQuality = quality
+			bestURL = prog.URL
+		}
+	}
+
+	return bestURL, bestQuality
+}
+
+func (c *Client) downloadWithChunks(url string, outputPath string) error {
+	// Get file size
+	req, err := http.NewRequest("HEAD", url, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create stdout pipe: %v", err)
+		return fmt.Errorf("failed to create HEAD request: %v", err)
 	}
 
-	stderr, err := cmd.StderrPipe()
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Referer", "https://laracasts.com/")
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to create stderr pipe: %v", err)
+		return fmt.Errorf("failed HEAD request: %v", err)
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			print("Failed to close response body")
+		}
+	}(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HEAD request failed with status: %d", resp.StatusCode)
 	}
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start ffmpeg: %v", err)
+	fileSize := resp.ContentLength
+	if fileSize <= 0 {
+		return fmt.Errorf("invalid file size: %d", fileSize)
 	}
 
-	var barMutex sync.Mutex
-	bar := progressbar.NewOptions(-1,
+	// Create buffered file writer
+	writer, err := NewBufferedFileWriter(outputPath, fileSize)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %v", err)
+	}
+	defer func(writer *BufferedFileWriter) {
+		err := writer.Close()
+		if err != nil {
+			print("Failed to close output file")
+		}
+	}(writer)
+
+	// Setup progress bar
+	bar := progressbar.NewOptions64(
+		fileSize,
 		progressbar.OptionSetDescription("Downloading"),
-		progressbar.OptionSetWriter(os.Stdout),
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionSetWidth(30),
-		progressbar.OptionThrottle(65*time.Millisecond),
 		progressbar.OptionShowCount(),
-		progressbar.OptionSetRenderBlankState(true),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "=",
+			SaucerHead:    ">",
+			SaucerPadding: " ",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}),
 	)
 
-	durationFound := make(chan time.Duration, 1)
+	// Calculate chunks
+	numChunks := int(math.Ceil(float64(fileSize) / float64(ChunkSize)))
+	chunks := make([]struct {
+		start int64
+		end   int64
+	}, numChunks)
 
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.Contains(line, "Duration:") {
-				parts := strings.Split(line, ",")
-				if len(parts) > 0 {
-					durStr := strings.TrimPrefix(parts[0], "Duration:")
-					durStr = strings.TrimSpace(durStr)
-					if duration, err := time.ParseDuration(strings.Replace(durStr, ":", "h", 1) + "m"); err == nil {
-						durationFound <- duration
-						break
-					}
-				}
-			}
+	for i := 0; i < numChunks; i++ {
+		start := int64(i) * ChunkSize
+		end := start + ChunkSize
+		if end > fileSize {
+			end = fileSize
 		}
-	}()
-
-	var totalDuration time.Duration
-	progressRegex := regexp.MustCompile(`out_time_ms=(\d+)`)
-
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			line := scanner.Text()
-
-			select {
-			case duration := <-durationFound:
-				totalDuration = duration
-				barMutex.Lock()
-				bar.ChangeMax64(int64(totalDuration.Seconds()))
-				barMutex.Unlock()
-			default:
-			}
-
-			matches := progressRegex.FindStringSubmatch(line)
-			if len(matches) > 1 {
-				microsecondsStr := matches[1]
-				microseconds, err := strconv.ParseInt(microsecondsStr, 10, 64)
-				if err == nil {
-					seconds := microseconds / 1000000
-					barMutex.Lock()
-					err := bar.Set64(seconds)
-					if err != nil {
-						return
-					}
-					barMutex.Unlock()
-				}
-			}
-		}
-	}()
-
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("ffmpeg failed: %v", err)
+		chunks[i] = struct {
+			start int64
+			end   int64
+		}{start, end}
 	}
 
-	barMutex.Lock()
-	err = bar.Finish()
+	// Create buffer pool
+	bufferPool := sync.Pool{
+		New: func() interface{} {
+			return make([]byte, MemoryBuffer)
+		},
+	}
+
+	// Download chunks
+	var wg sync.WaitGroup
+	errors := make(chan error, numChunks)
+	limiter := make(chan struct{}, MaxChunkWorkers)
+
+	for i, chunk := range chunks {
+		wg.Add(1)
+		go func(chunkIndex int, start, end int64) {
+			defer wg.Done()
+			limiter <- struct{}{}        // Acquire semaphore
+			defer func() { <-limiter }() // Release semaphore
+
+			// Get buffer from pool
+			buffer := bufferPool.Get().([]byte)
+			defer bufferPool.Put(buffer)
+
+			// Retry logic for chunk download
+			var lastErr error
+			for retry := 0; retry < MaxRetries; retry++ {
+				if err := c.downloadChunk(url, writer, start, end, bar, buffer); err != nil {
+					lastErr = err
+					time.Sleep(time.Second)
+					continue
+				}
+				lastErr = nil
+				break
+			}
+
+			if lastErr != nil {
+				errors <- fmt.Errorf("chunk %d failed after %d retries: %v",
+					chunkIndex, MaxRetries, lastErr)
+			}
+		}(i, chunk.start, chunk.end)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	// Check for errors
+	var errMsgs []string
+	for err := range errors {
+		if err != nil {
+			errMsgs = append(errMsgs, err.Error())
+		}
+	}
+
+	if len(errMsgs) > 0 {
+		return fmt.Errorf("chunk download errors:\n%s",
+			strings.Join(errMsgs, "\n"))
+	}
+
+	fmt.Println() // New line after progress bar
+	return nil
+}
+
+func (c *Client) downloadChunk(url string, writer *BufferedFileWriter,
+	start, end int64, bar *progressbar.ProgressBar, buffer []byte) error {
+
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create request: %v", err)
 	}
-	barMutex.Unlock()
-	fmt.Println()
 
-	if info, err := os.Stat(outputPath); err != nil {
-		return fmt.Errorf("failed to verify download: %v", err)
-	} else if info.Size() < 1024*1024 {
-		return fmt.Errorf("downloaded file is too small (%d bytes)", info.Size())
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end-1))
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Referer", "https://laracasts.com/")
+	req.Header.Set("Origin", "https://laracasts.com")
+	req.Header.Set("Accept", "*/*")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("chunk request failed: %v", err)
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			print("Failed to close response body")
+		}
+	}(resp.Body)
+
+	if resp.StatusCode != http.StatusPartialContent {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	// Read and write chunk using buffer
+	reader := bufio.NewReader(resp.Body)
+	written := int64(0)
+
+	for written < end-start {
+		n, err := reader.Read(buffer)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to read chunk: %v", err)
+		}
+		if n == 0 {
+			break
+		}
+
+		if _, err := writer.WriteAt(buffer[:n], start+written); err != nil {
+			return fmt.Errorf("failed to write chunk: %v", err)
+		}
+
+		written += int64(n)
+		err = bar.Add64(int64(n))
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil

@@ -1,10 +1,16 @@
+// internal/config/config.go
+
 package config
 
-// Laracasts base URLs and paths
+// Lara casts base URLs and paths
 const (
 	LaracastsBaseUrl       = "https://laracasts.com"
 	LaracastsPostLoginPath = "/sessions"
 	LaracastsSeriesPath    = "/series"
+	LaracastsApiPath       = "/api/series"
+	LaracastsBitsPath      = "/bits"
+	LaracastsTopicsPath    = "/topics"
+	LaracastsBrowsePath    = "/browse"
 )
 
 // DefaultHeaders HTTP request headers
@@ -18,15 +24,4 @@ var InertiaHeaders = map[string]string{
 	"X-Inertia-Version": "1.0",
 	"Accept":            "application/json",
 	"X-Requested-With":  "XMLHttpRequest",
-}
-
-// DownloadConfig Download configuration
-type DownloadConfig struct {
-	BasePath          string
-	ConcurrentWorkers int
-	RetryAttempts     int
-	RetryDelay        int   // seconds
-	MinFileSize       int64 // bytes
-	PageDelay         int   // seconds
-	DownloadDelay     int   // seconds
 }
