@@ -10,13 +10,10 @@ import (
 
 func main() {
 	// Define flags
-	var larabitFlag, seriesFlag, topicFlag, teacherFlag string
+	var seriesFlag string
 
 	// Set up flags without default values
 	flag.StringVar(&seriesFlag, "s", "", "Series slug (leave empty to download all series)")
-	flag.StringVar(&larabitFlag, "l", "", "Larabit slug (leave empty to download all larabits)")
-	flag.StringVar(&topicFlag, "t", "", "Topic slug (leave empty to download all topics)")
-	flag.StringVar(&teacherFlag, "teacher", "", "Teacher name for filtering bits (e.g., JeffreyWay)")
 
 	// Parse flags
 	flag.Parse()
