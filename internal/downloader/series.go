@@ -464,6 +464,7 @@ func (d *Downloader) DownloadSeries(seriesSlug string) error {
 					id, episode.Number, episode.Title)
 
 				err := d.downloadEpisode(outputDir, episode)
+				time.Sleep(time.Millisecond)
 				results <- struct {
 					episode   Episode
 					outputDir string

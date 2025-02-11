@@ -112,6 +112,18 @@ func (d *Downloader) getXSRFToken() (string, error) {
 }
 
 func (d *Downloader) downloadEpisode(outputDir string, episode Episode) error {
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		err := d.tryDownload(outputDir, episode)
+		if err == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(i*i) * time.Second)
+	}
+	return fmt.Errorf("failed after %d retries", maxRetries)
+}
+
+func (d *Downloader) tryDownload(outputDir string, episode Episode) error {
 	filename := fmt.Sprintf("%02d-%s.mp4", episode.Number, sanitizeFilename(episode.Title))
 	outputPath := filepath.Join(outputDir, filename) // Use the provided outputDir
 
