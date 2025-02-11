@@ -1,3 +1,4 @@
 /cmd/laracasts-dl/downloads/
 .idea
 .env
+qodana.yaml
