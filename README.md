@@ -1,5 +1,6 @@
 ## Laracast Downloader
 This is the Go version of Laracasts downloader, ultra fast. For this be sure that go installed.
+Currently work with series URI, in future version it will download by topics, larabits, by teacher.
 
 ### Features
 - Go version of Laracasts downloader
