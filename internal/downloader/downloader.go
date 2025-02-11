@@ -111,9 +111,9 @@ func (d *Downloader) getXSRFToken() (string, error) {
 	return "", fmt.Errorf("XSRF token not found in cookies")
 }
 
-func (d *Downloader) downloadEpisode(seriesSlug string, episode Episode) error {
+func (d *Downloader) downloadEpisode(outputDir string, episode Episode) error {
 	filename := fmt.Sprintf("%02d-%s.mp4", episode.Number, sanitizeFilename(episode.Title))
-	outputPath := filepath.Join(d.BasePath, "series", seriesSlug, filename)
+	outputPath := filepath.Join(outputDir, filename) // Use the provided outputDir
 
 	// Check if file already exists and is complete
 	if info, err := os.Stat(outputPath); err == nil && info.Size() > 0 {

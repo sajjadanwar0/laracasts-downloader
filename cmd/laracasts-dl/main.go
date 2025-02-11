@@ -137,7 +137,7 @@ func main() {
 		// 1. No -s flag was provided at all
 		// 2. -s flag was provided but empty (-s "")
 		fmt.Println("No series specified, downloading all series...")
-		downloadErr = dl.DownloadAllByTopics()
+		downloadErr = dl.DownloadAllSeries()
 	}
 
 	if downloadErr != nil {
