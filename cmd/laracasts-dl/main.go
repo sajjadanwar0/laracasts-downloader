@@ -3,12 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/joho/godotenv"
 	"github.com/sajjadanwar0/laracasts-dl/internal/config"
+	"github.com/sajjadanwar0/laracasts-dl/internal/downloader"
 	"os"
 	"path/filepath"
-
-	"github.com/joho/godotenv"
-	"github.com/sajjadanwar0/laracasts-dl/internal/downloader"
 )
 
 func loadEnv() error {
