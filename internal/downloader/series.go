@@ -1,18 +1,21 @@
 package downloader
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/sajjadanwar0/laracasts-dl/internal/config"
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	_ "net/url"
+	"strings"
+	"sync/atomic"
 
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	_ "strings"
 	"sync"
 	"time"
@@ -34,12 +37,170 @@ type DownloadState struct {
 	LastSync  time.Time       `json:"last_sync"`
 }
 
+func (d *Downloader) getTopicSeries(topicURL string) ([]struct {
+	Title string
+	Slug  string
+}, error) {
+	req, err := http.NewRequest("GET", topicURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %v", err)
+	}
+
+	for k, v := range config.DefaultHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := d.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %v", err)
+	}
+
+	// First try to find the data-page attribute
+	dataPageRe := regexp.MustCompile(`data-page="([^"]+)"`)
+	var pageData string
+
+	if matches := dataPageRe.FindSubmatch(body); len(matches) > 1 {
+		pageData = html.UnescapeString(string(matches[1]))
+	} else {
+		// Try finding the script tag with page data
+		scriptRe := regexp.MustCompile(`<script\s+id="page-data"\s+type="application/json"[^>]*>(.*?)</script>`)
+		if matches := scriptRe.FindSubmatch(body); len(matches) > 1 {
+			pageData = html.UnescapeString(string(matches[1]))
+		}
+	}
+
+	if pageData == "" {
+		// Save the HTML for debugging
+		debugFile := "debug_topic_page.html"
+		if err := os.WriteFile(debugFile, body, 0644); err == nil {
+			fmt.Printf("Saved HTML content to %s for debugging\n", debugFile)
+		}
+		return nil, fmt.Errorf("no series data found in topic page")
+	}
+
+	// Parse the JSON data structure based on the actual page structure
+	var pageStruct struct {
+		Props struct {
+			Series []struct {
+				Title string `json:"title"`
+				Slug  string `json:"slug"`
+			} `json:"series"`
+			FeaturedCollection struct {
+				Items []struct {
+					Title string `json:"title"`
+					Slug  string `json:"slug"`
+				} `json:"items"`
+			} `json:"featuredCollection"`
+			PublicCollections []struct {
+				Items []struct {
+					Title string `json:"title"`
+					Slug  string `json:"slug"`
+				} `json:"items"`
+			} `json:"publicCollections"`
+		} `json:"props"`
+	}
+
+	if err := json.Unmarshal([]byte(pageData), &pageStruct); err != nil {
+		return nil, fmt.Errorf("failed to parse page data: %v", err)
+	}
+
+	// Collect all unique series
+	seriesMap := make(map[string]struct {
+		Title string
+		Slug  string
+	})
+
+	// Add series from main series array if present
+	for _, s := range pageStruct.Props.Series {
+		if s.Slug != "" {
+			seriesMap[s.Slug] = struct {
+				Title string
+				Slug  string
+			}{
+				Title: s.Title,
+				Slug:  cleanSeriesSlug(s.Slug),
+			}
+		}
+	}
+
+	// Add series from featured collection
+	for _, item := range pageStruct.Props.FeaturedCollection.Items {
+		if item.Slug != "" {
+			seriesMap[item.Slug] = struct {
+				Title string
+				Slug  string
+			}{
+				Title: item.Title,
+				Slug:  cleanSeriesSlug(item.Slug),
+			}
+		}
+	}
+
+	// Add series from public collections
+	for _, collection := range pageStruct.Props.PublicCollections {
+		for _, item := range collection.Items {
+			if item.Slug != "" {
+				seriesMap[item.Slug] = struct {
+					Title string
+					Slug  string
+				}{
+					Title: item.Title,
+					Slug:  cleanSeriesSlug(item.Slug),
+				}
+			}
+		}
+	}
+
+	// Convert map to slice
+	var series []struct {
+		Title string
+		Slug  string
+	}
+	for _, s := range seriesMap {
+		series = append(series, s)
+	}
+
+	if len(series) == 0 {
+		return nil, fmt.Errorf("no series found in topic page")
+	}
+
+	fmt.Printf("\nFound %d series in topic\n", len(series))
+	for i, s := range series {
+		fmt.Printf("%d. %s (%s)\n", i+1, s.Title, s.Slug)
+	}
+
+	return series, nil
+}
+
+// Helper function to clean series slugs
+func cleanSeriesSlug(slug string) string {
+	// Remove any number of "series/" prefixes
+	for strings.HasPrefix(slug, "series/") {
+		slug = strings.TrimPrefix(slug, "series/")
+	}
+	// Add back a single "series/" prefix
+	return fmt.Sprintf("series/%s", slug)
+}
+
 func (d *Downloader) DownloadSeries(seriesSlug string) error {
 	printBox(fmt.Sprintf("Downloading series: %s", seriesSlug))
 
+	// Clean up the series slug by removing any "series/" prefixes
+	cleanSlug := strings.TrimPrefix(seriesSlug, "series/")
+	cleanSlug = strings.TrimPrefix(cleanSlug, "series/") // Remove second "series/" if present
+
+	// For API requests, ensure we have the series/ prefix
+	apiSlug := fmt.Sprintf("series/%s", cleanSlug)
+
 	// Try to get series metadata from cache
 	var seriesData SeriesMetadata
-	cacheKey := fmt.Sprintf("series_%s", seriesSlug)
+	cacheKey := fmt.Sprintf("series_%s", cleanSlug)
 
 	found, err := d.Cache.Get(cacheKey, &seriesData)
 	if err != nil {
@@ -48,10 +209,11 @@ func (d *Downloader) DownloadSeries(seriesSlug string) error {
 	}
 
 	// Fetch fresh data if not found in cache or stale
-	if !found || d.Cache.IsStale(cacheKey, 24*time.Hour) {
+	if !found || d.Cache.IsStale(cacheKey, 2*3600*24*365) {
 		fmt.Println("Fetching series metadata from Laracasts...")
 
-		seriesURL := fmt.Sprintf("%s/%s", config.LaracastsBaseUrl, seriesSlug)
+		// Use full series URL for API request
+		seriesURL := fmt.Sprintf("%s/%s", config.LaracastsBaseUrl, apiSlug)
 		jsonData, err := d.fetchSeriesData(seriesURL)
 		if err != nil {
 			return fmt.Errorf("failed to fetch series data: %v", err)
@@ -242,10 +404,6 @@ func (d *Downloader) fetchSeriesData(url string) (string, error) {
 		return "", fmt.Errorf("failed to create request: %v", err)
 	}
 
-	for k, v := range config.InertiaHeaders {
-		req.Header.Set(k, v)
-	}
-
 	token, _ := d.getXSRFToken()
 	if token != "" {
 		req.Header.Set("X-XSRF-TOKEN", token)
@@ -321,26 +479,185 @@ func (d *Downloader) saveDownloadState(seriesSlug string, state *DownloadState) 
 	return d.Cache.Set(fmt.Sprintf("download_state_%s", seriesSlug), state)
 }
 
+func (d *Downloader) DownloadAllSeries() error {
+	printBox("Downloading all series")
+
+	// Get the series listing page
+	seriesURL := fmt.Sprintf("%s/series", config.LaracastsBaseUrl)
+
+	req, err := http.NewRequest("GET", seriesURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	for k, v := range config.DefaultHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := d.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %v", err)
+	}
+
+	// Try to extract data from data-page attribute first
+	dataPageRe := regexp.MustCompile(`data-page="([^"]+)"`)
+	var pageData string
+
+	if matches := dataPageRe.FindSubmatch(body); len(matches) > 1 {
+		pageData = html.UnescapeString(string(matches[1]))
+	} else {
+		// Fallback to script tag
+		scriptRe := regexp.MustCompile(`<script\s+id="page-data"\s+type="application/json"[^>]*>(.*?)</script>`)
+		if matches := scriptRe.FindSubmatch(body); len(matches) > 1 {
+			pageData = html.UnescapeString(string(matches[1]))
+		}
+	}
+
+	if pageData == "" {
+		return fmt.Errorf("no series data found in page")
+	}
+
+	// Parse the JSON structure
+	var jsonData struct {
+		Props struct {
+			PublicCollections []struct {
+				Items []struct {
+					Slug string `json:"slug"`
+				} `json:"items"`
+			} `json:"publicCollections"`
+			FeaturedCollection struct {
+				Items []struct {
+					Slug string `json:"slug"`
+				} `json:"items"`
+			} `json:"featuredCollection"`
+		} `json:"props"`
+	}
+
+	if err := json.Unmarshal([]byte(pageData), &jsonData); err != nil {
+		return fmt.Errorf("failed to parse JSON data: %v", err)
+	}
+
+	// Collect unique slugs and add "series/" prefix
+	slugMap := make(map[string]bool)
+	var slugs []string
+
+	// Add featured collection slugs
+	for _, item := range jsonData.Props.FeaturedCollection.Items {
+		if item.Slug != "" && !slugMap[item.Slug] {
+			slugMap[item.Slug] = true
+			// Add "series/" prefix to match working format
+			cleanSlug := cleanSeriesSlug(item.Slug)
+
+			slugs = append(slugs, cleanSlug)
+		}
+	}
+
+	// Add public collections slugs
+	for _, collection := range jsonData.Props.PublicCollections {
+		for _, item := range collection.Items {
+			if item.Slug != "" && !slugMap[item.Slug] {
+				slugMap[item.Slug] = true
+				// Add "series/" prefix to match working format
+				slugs = append(slugs, fmt.Sprintf("series/%s", item.Slug))
+			}
+		}
+	}
+
+	if len(slugs) == 0 {
+		return fmt.Errorf("no series slugs found in page data")
+	}
+
+	fmt.Printf("\nFound %d series to download\n", len(slugs))
+	for i, slug := range slugs {
+		fmt.Printf("%d. %s\n", i+1, slug)
+	}
+
+	// Create channels for concurrent downloads
+	sem := make(chan bool, 6) // Limit concurrent downloads
+	var wg sync.WaitGroup
+	var (
+		completedSeries int32
+		failedSeries    int32
+		mu              sync.Mutex
+	)
+
+	// Process each series
+	for i, slug := range slugs {
+		wg.Add(1)
+		sem <- true // Acquire semaphore
+
+		go func(idx int, seriesSlug string) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release semaphore
+
+			mu.Lock()
+			fmt.Printf("\n[%d/%d] 📺 Starting series: %s\n", idx+1, len(slugs), seriesSlug)
+			mu.Unlock()
+
+			// Use existing DownloadSeries function with full path
+			if err := d.DownloadSeries(seriesSlug); err != nil {
+				mu.Lock()
+				fmt.Printf("❌ Error downloading series '%s': %v\n", seriesSlug, err)
+				mu.Unlock()
+				atomic.AddInt32(&failedSeries, 1)
+				return
+			}
+
+			atomic.AddInt32(&completedSeries, 1)
+			mu.Lock()
+			fmt.Printf("✅ Completed series: %s\n", seriesSlug)
+
+			progress := fmt.Sprintf("\nProgress: %.1f%% (%d/%d) Series Completed\n",
+				float64(atomic.LoadInt32(&completedSeries))/float64(len(slugs))*100,
+				atomic.LoadInt32(&completedSeries),
+				len(slugs))
+			fmt.Print(progress)
+			mu.Unlock()
+
+			// Small delay between series
+			time.Sleep(500 * time.Millisecond)
+		}(i, slug)
+	}
+
+	// Wait for all downloads to complete
+	wg.Wait()
+
+	// Print summary
+	completed := atomic.LoadInt32(&completedSeries)
+	failed := atomic.LoadInt32(&failedSeries)
+
+	fmt.Printf("\n🎉 Download Summary:\n")
+	fmt.Printf("Total Series Found: %d\n", len(slugs))
+	fmt.Printf("Series Completed: %d\n", completed)
+	fmt.Printf("Series Failed: %d\n", failed)
+
+	if failed > 0 {
+		return fmt.Errorf("%d series failed to download", failed)
+	}
+
+	return nil
+}
+
 func (d *Downloader) getSeriesPage(page int) ([]struct {
 	Title string `json:"title"`
 	Slug  string `json:"slug"`
 }, string, error) {
-	browseURL := fmt.Sprintf("%s/browse/series?page=%d", config.LaracastsBaseUrl, page)
-	fmt.Printf("Fetching URL: %s\n", browseURL)
+	seriesURL := fmt.Sprintf("%s%s", config.LaracastsBaseUrl, config.LaracastsSeriesPath)
+	fmt.Printf("Fetching series list from: %s\n", seriesURL)
 
-	// First try with Inertia headers
-	req, err := http.NewRequest("GET", browseURL, nil)
+	req, err := http.NewRequest("GET", seriesURL, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create request: %v", err)
 	}
 
-	for k, v := range config.InertiaHeaders {
+	for k, v := range config.DefaultHeaders {
 		req.Header.Set(k, v)
-	}
-
-	token, _ := d.getXSRFToken()
-	if token != "" {
-		req.Header.Set("X-XSRF-TOKEN", token)
 	}
 
 	resp, err := d.Client.Do(req)
@@ -354,154 +671,193 @@ func (d *Downloader) getSeriesPage(page int) ([]struct {
 		return nil, "", fmt.Errorf("failed to read response: %v", err)
 	}
 
-	// Extract data-page content from HTML
+	// First try to find the data-page attribute
 	dataPageRe := regexp.MustCompile(`data-page="([^"]+)"`)
-	matches := dataPageRe.FindSubmatch(body)
-	if len(matches) < 2 {
-		// Try alternate script tag pattern
+	var pageData string
+
+	if matches := dataPageRe.FindSubmatch(body); len(matches) > 1 {
+		pageData = html.UnescapeString(string(matches[1]))
+	} else {
+		// Try finding the script tag with page data
 		scriptRe := regexp.MustCompile(`<script\s+id="page-data"\s+type="application/json"[^>]*>(.*?)</script>`)
-		matches = scriptRe.FindSubmatch(body)
-		if len(matches) < 2 {
-			return nil, "", fmt.Errorf("could not find series data in response")
+		if matches := scriptRe.FindSubmatch(body); len(matches) > 1 {
+			pageData = html.UnescapeString(string(matches[1]))
 		}
 	}
 
-	// Decode HTML entities and unescape JSON
-	decodedContent := html.UnescapeString(string(matches[1]))
+	if pageData == "" {
+		// Save the response for debugging
+		debugFile := "debug_series_page.html"
+		if err := os.WriteFile(debugFile, body, 0644); err == nil {
+			fmt.Printf("Saved HTML content to %s for debugging\n", debugFile)
+		}
+		return nil, "", fmt.Errorf("no series data found in page")
+	}
 
-	// Parse the Inertia JSON response
-	var response struct {
+	// Parse the JSON data
+	var pageStruct struct {
 		Props struct {
-			Series []struct {
-				ID    int    `json:"id"`
-				Title string `json:"title"`
-				Path  string `json:"path"`
-				Slug  string `json:"slug"`
-			} `json:"items"`
-			Links struct {
-				Next string `json:"next"`
-			} `json:"links"`
+			PublicCollections []struct {
+				Items []struct {
+					Title string `json:"title"`
+					Slug  string `json:"slug"`
+				} `json:"items"`
+			} `json:"publicCollections"`
+			FeaturedCollection struct {
+				Items []struct {
+					Title string `json:"title"`
+					Slug  string `json:"slug"`
+				} `json:"items"`
+			} `json:"featuredCollection"`
 		} `json:"props"`
 	}
 
-	if err := json.Unmarshal([]byte(decodedContent), &response); err != nil {
-		// Debug output
-		fmt.Printf("Failed to parse JSON content: %s\n", decodedContent)
-		return nil, "", fmt.Errorf("failed to parse JSON: %v", err)
+	if err := json.Unmarshal([]byte(pageData), &pageStruct); err != nil {
+		return nil, "", fmt.Errorf("failed to parse page data: %v", err)
 	}
 
-	// Convert to expected format
+	// Collect all unique series
+	seriesMap := make(map[string]struct {
+		Title string
+		Slug  string
+	})
+
+	// Add series from featured collection
+	for _, item := range pageStruct.Props.FeaturedCollection.Items {
+		if item.Slug != "" {
+			seriesMap[item.Slug] = struct {
+				Title string
+				Slug  string
+			}{
+				Title: item.Title,
+				Slug:  item.Slug,
+			}
+		}
+	}
+
+	// Add series from public collections
+	for _, collection := range pageStruct.Props.PublicCollections {
+		for _, item := range collection.Items {
+			if item.Slug != "" {
+				seriesMap[item.Slug] = struct {
+					Title string
+					Slug  string
+				}{
+					Title: item.Title,
+					Slug:  item.Slug,
+				}
+			}
+		}
+	}
+
+	// Convert map to slice
 	var series []struct {
 		Title string `json:"title"`
 		Slug  string `json:"slug"`
 	}
-
-	for _, s := range response.Props.Series {
-		slug := s.Slug
-		if slug == "" {
-			// Extract slug from path
-			slug = strings.TrimPrefix(s.Path, "/series/")
-		}
-
+	for _, s := range seriesMap {
 		series = append(series, struct {
 			Title string `json:"title"`
 			Slug  string `json:"slug"`
 		}{
 			Title: s.Title,
-			Slug:  slug,
+			Slug:  s.Slug,
 		})
 	}
 
-	var nextPage string
-	if response.Props.Links.Next != "" {
-		nextPage = response.Props.Links.Next
+	if len(series) == 0 {
+		return nil, "", fmt.Errorf("no series found in page data")
 	}
 
-	fmt.Printf("Found %d series on this page\n", len(series))
-	for _, s := range series {
-		fmt.Printf("- %s (%s)\n", s.Title, s.Slug)
+	fmt.Printf("\nFound %d unique series\n", len(series))
+	for i, s := range series {
+		fmt.Printf("%d. %s (%s)\n", i+1, s.Title, s.Slug)
 	}
 
-	return series, nextPage, nil
+	return series, "", nil
 }
 
-func (d *Downloader) DownloadAllSeries() error {
-	printBox("Downloading all series")
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
-	page := 1
-	hasMore := true
-	var totalSeries, completedSeries, failedSeries int
-	downloadedSeries := make(map[string]bool) // Track downloaded series to avoid duplicates
+// Helper function to get raw XSRF token
+func (d *Downloader) getXSRFTokenRaw() string {
+	laracastsURL, _ := url.Parse(config.LaracastsBaseUrl)
+	cookies := d.Client.Jar.Cookies(laracastsURL)
 
-	// Create a channel to limit concurrent downloads
-	sem := make(chan bool, 3) // Limit to 3 concurrent downloads
-	var wg sync.WaitGroup
-
-	for hasMore {
-		fmt.Printf("\n📚 Fetching page %d of series catalog...\n", page)
-
-		series, nextPage, err := d.getSeriesPage(page)
-		if err != nil {
-			return fmt.Errorf("failed to fetch series page %d: %v", page, err)
-		}
-
-		totalOnPage := len(series)
-		if totalOnPage == 0 {
-			break
-		}
-
-		totalSeries += totalOnPage
-		fmt.Printf("\nFound %d series on page %d\n", totalOnPage, page)
-
-		// Process series concurrently
-		for idx, s := range series {
-			// Skip if already downloaded
-			if downloadedSeries[s.Slug] {
-				continue
-			}
-			downloadedSeries[s.Slug] = true
-
-			wg.Add(1)
-			sem <- true // Acquire semaphore
-
-			go func(idx int, s struct {
-				Title string `json:"title"`
-				Slug  string `json:"slug"`
-			}) {
-				defer wg.Done()
-				defer func() { <-sem }() // Release semaphore
-
-				fmt.Printf("\n[%d/%d] 📺 Downloading series: %s\n", idx+1, totalOnPage, s.Title)
-
-				if err := d.DownloadSeries(s.Slug); err != nil {
-					fmt.Printf("❌ Error downloading series '%s': %v\n", s.Title, err)
-					failedSeries++
-				} else {
-					completedSeries++
-					fmt.Printf("✅ Completed series: %s\n", s.Title)
-				}
-			}(idx, s)
-		}
-
-		// Check for next page
-		if nextPage == "" {
-			hasMore = false
-		} else {
-			page++
+	for _, cookie := range cookies {
+		if cookie.Name == "XSRF-TOKEN" {
+			return cookie.Value
 		}
 	}
+	return ""
+}
 
-	// Wait for all downloads to complete
-	wg.Wait()
+// Update the cookie handling function to handle the initial request
+func (d *Downloader) Login(email, password string) error {
+	printBox("Authenticating")
 
-	fmt.Printf("\n🎉 Download Summary:\n")
-	fmt.Printf("Total Series Found: %d\n", totalSeries)
-	fmt.Printf("Series Completed: %d\n", completedSeries)
-	fmt.Printf("Series Failed: %d\n", failedSeries)
-
-	if failedSeries > 0 {
-		return fmt.Errorf("some series failed to download (%d failed)", failedSeries)
+	// First visit the site to get cookies
+	homeReq, err := http.NewRequest("GET", config.LaracastsBaseUrl, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create home request: %v", err)
 	}
 
+	homeReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	homeReq.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	homeResp, err := d.Client.Do(homeReq)
+	if err != nil {
+		return fmt.Errorf("failed home request: %v", err)
+	}
+	homeResp.Body.Close()
+
+	// Get XSRF token
+	token, err := d.getXSRFToken()
+	if err != nil {
+		return fmt.Errorf("failed to get XSRF token: %v", err)
+	}
+
+	// Prepare login data
+	auth := map[string]interface{}{
+		"email":    email,
+		"password": password,
+		"remember": true,
+	}
+
+	jsonData, err := json.Marshal(auth)
+	if err != nil {
+		return fmt.Errorf("failed to marshal auth data: %v", err)
+	}
+
+	// Send login request
+	loginURL := config.LaracastsBaseUrl + config.LaracastsPostLoginPath
+	req, err := http.NewRequest("POST", loginURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create login request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-XSRF-TOKEN", token)
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Referer", config.LaracastsBaseUrl)
+
+	resp, err := d.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed login request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	fmt.Printf("✓ Logged in as %s\n", email)
 	return nil
 }

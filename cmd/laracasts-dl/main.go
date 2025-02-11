@@ -5,6 +5,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/sajjadanwar0/laracasts-dl/internal/config"
 	"os"
 	"path/filepath"
 
@@ -46,9 +47,20 @@ func loadEnv() error {
 		return fmt.Errorf("could not find .env file, last error: %v", loadErr)
 	}
 
+	// Validate all required environment variables
+	for _, env := range config.RequiredEnvVars {
+		if os.Getenv(env) == "" {
+			return fmt.Errorf("required environment variable %s is not set", env)
+		}
+	}
+
+	// Validate video quality
+	if !config.ValidateVideoQuality(os.Getenv("VIDEO_QUALITY")) {
+		return fmt.Errorf("invalid VIDEO_QUALITY in .env. Must be one of: 360p, 540p, 720p, 1080p")
+	}
+
 	return nil
 }
-
 func main() {
 	// Define flags
 	var (
@@ -59,6 +71,7 @@ func main() {
 		chunkSize  int
 	)
 
+	// Define flags but don't parse yet
 	flag.StringVar(&seriesFlag, "s", "", "Series slug to download (leave empty to download all series)")
 	flag.BoolVar(&clearCache, "clear-cache", false, "Clear the cache before starting")
 	flag.BoolVar(&noCache, "no-cache", false, "Ignore cache and download fresh")
@@ -105,20 +118,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Download series
-	if seriesFlag != "" {
-		// Download specific series
-		if err := dl.DownloadSeries(seriesFlag); err != nil {
-			fmt.Printf("\nError downloading series: %v\n", err)
-			os.Exit(1)
+	// Check if -s flag was provided (regardless of value)
+	isFlagProvided := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "s" {
+			isFlagProvided = true
 		}
+	})
+
+	// Handle downloads based on flag state
+	var downloadErr error
+	if isFlagProvided && seriesFlag != "" {
+		// Specific series download
+		fmt.Printf("Downloading specific series: %s\n", seriesFlag)
+		downloadErr = dl.DownloadSeries(seriesFlag)
 	} else {
-		// Download all series
-		fmt.Println("\nNo series specified, downloading all series...")
-		if err := dl.DownloadAllSeries(); err != nil {
-			fmt.Printf("\nError downloading all series: %v\n", err)
-			os.Exit(1)
-		}
+		// Download all series if:
+		// 1. No -s flag was provided at all
+		// 2. -s flag was provided but empty (-s "")
+		fmt.Println("No series specified, downloading all series...")
+		downloadErr = dl.DownloadAllByTopics()
+	}
+
+	if downloadErr != nil {
+		fmt.Printf("\nError during download: %v\n", downloadErr)
+		os.Exit(1)
 	}
 
 	fmt.Println("\nDownload completed successfully!")
