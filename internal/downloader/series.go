@@ -337,7 +337,7 @@ func (d *Downloader) DownloadSeries(seriesSlug string) error {
 	}
 
 	// Fetch fresh data if not found in cache or stale
-	if !found || d.Cache.IsStale(cacheKey, 2*3600*24*365) {
+	if !found || d.Cache.IsStale(cacheKey, 3600*24*7) {
 		fmt.Println("Fetching series metadata from Laracasts...")
 
 		// Use full series URL for API request
