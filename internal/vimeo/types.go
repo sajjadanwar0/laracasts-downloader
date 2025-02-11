@@ -12,7 +12,6 @@ const (
 	MaxChunkWorkers = 15               // Concurrent chunks per download
 	MaxRetries      = 3                // Maximum retries per chunk
 	MemoryBuffer    = 32 * 1024        // 32KB buffer for file operations
-
 )
 
 type VideoConfig struct {

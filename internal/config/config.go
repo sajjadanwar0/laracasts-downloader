@@ -8,7 +8,6 @@ import (
 	"strings"
 )
 
-// Required environment variables
 var RequiredEnvVars = []string{
 	"EMAIL",
 	"PASSWORD",
@@ -16,7 +15,6 @@ var RequiredEnvVars = []string{
 	"VIDEO_QUALITY", // Now required
 }
 
-// Laracasts base URLs and paths
 const (
 	LaracastsBaseUrl       = "https://laracasts.com"
 	LaracastsPostLoginPath = "/sessions"
@@ -34,12 +32,6 @@ var DefaultHeaders = map[string]string{
 	"Accept-Language": "en-US,en;q=0.9",
 	"Connection":      "keep-alive",
 	"Cache-Control":   "no-cache",
-}
-
-var JsonHeaders = map[string]string{
-	"Accept":           "application/json",
-	"X-Requested-With": "XMLHttpRequest",
-	"Content-Type":     "application/json",
 }
 
 // GetDownloadPath returns the processed download path from env

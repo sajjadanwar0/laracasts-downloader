@@ -1,5 +1,3 @@
-// cmd/laracasts-dl/main.go
-
 package main
 
 import (

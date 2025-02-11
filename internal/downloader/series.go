@@ -9,15 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	_ "net/url"
-	"strings"
-	"sync/atomic"
-
 	"os"
 	"path/filepath"
 	"regexp"
-	_ "strings"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -56,7 +53,12 @@ func (d *Downloader) DownloadAllByTopics() error {
 	if err != nil {
 		return fmt.Errorf("failed request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			printBox("Failed to close response body")
+		}
+	}(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -76,7 +78,10 @@ func (d *Downloader) DownloadAllByTopics() error {
 	for _, match := range matches {
 		if len(match) >= 4 {
 			seriesCount := 0
-			fmt.Sscanf(match[3], "%d", &seriesCount)
+			_, err := fmt.Sscanf(match[3], "%d", &seriesCount)
+			if err != nil {
+				return err
+			}
 
 			topics = append(topics, struct {
 				URL         string
@@ -247,7 +252,12 @@ func (d *Downloader) getTopicSeries(topicURL string) ([]struct {
 	if err != nil {
 		return nil, fmt.Errorf("failed request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			print("Failed to close response body")
+		}
+	}(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -630,7 +640,12 @@ func (d *Downloader) DownloadAllSeries() error {
 	if err != nil {
 		return fmt.Errorf("failed request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			printBox("Failed to close response body")
+		}
+	}(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -776,7 +791,7 @@ func (d *Downloader) DownloadAllSeries() error {
 	return nil
 }
 
-func (d *Downloader) getSeriesPage(page int) ([]struct {
+func (d *Downloader) getSeriesPage() ([]struct {
 	Title string `json:"title"`
 	Slug  string `json:"slug"`
 }, string, error) {
@@ -796,7 +811,12 @@ func (d *Downloader) getSeriesPage(page int) ([]struct {
 	if err != nil {
 		return nil, "", fmt.Errorf("failed request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			print("Failed to close response body")
+		}
+	}(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -909,13 +929,6 @@ func (d *Downloader) getSeriesPage(page int) ([]struct {
 	return series, "", nil
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // Helper function to get raw XSRF token
 func (d *Downloader) getXSRFTokenRaw() string {
 	laracastsURL, _ := url.Parse(config.LaracastsBaseUrl)
@@ -929,7 +942,7 @@ func (d *Downloader) getXSRFTokenRaw() string {
 	return ""
 }
 
-// Update the cookie handling function to handle the initial request
+// Login Update the cookie handling function to handle the initial request
 func (d *Downloader) Login(email, password string) error {
 	printBox("Authenticating")
 
@@ -946,7 +959,10 @@ func (d *Downloader) Login(email, password string) error {
 	if err != nil {
 		return fmt.Errorf("failed home request: %v", err)
 	}
-	homeResp.Body.Close()
+	err = homeResp.Body.Close()
+	if err != nil {
+		return err
+	}
 
 	// Get XSRF token
 	token, err := d.getXSRFToken()
@@ -983,7 +999,12 @@ func (d *Downloader) Login(email, password string) error {
 	if err != nil {
 		return fmt.Errorf("failed login request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			print("failed to close response body")
+		}
+	}(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
