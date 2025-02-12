@@ -15,8 +15,8 @@ Currently work with series URI, in future version it will download by topics, la
 - To run:
    1. Using build
       - ./laracasts-dl ---download all series
-      - ./laracasts-dl -s series/css-flexbox-simplified   ---download specific series
+      - ./laracasts-dl -s css-flexbox-simplified   ---download specific series
   2. Using dev mode
      - go run main.go ---download all series
-     - go run main.go -s series/css-flexbox-simplified ---download specific series
+     - go run main.go -s css-flexbox-simplified ---download specific series
          
