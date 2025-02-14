@@ -50,12 +50,15 @@ downloads/
    cp .env.example .env
    ```
 2. Set your environment variables in .env
+
+   ```
    EMAIL=your@email.com
    PASSWORD=your_password
    DOWNLOAD_PATH=/path/to/downloads
    VIDEO_QUALITY=1080p  # Options: 360p, 540p, 720p, 1080p
+   ```
 
-3. Run the downloader:
+4. Run the downloader:
 ```bash
 go run main.go
 ```
