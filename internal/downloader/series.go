@@ -18,227 +18,23 @@ import (
 	"time"
 )
 
-type SeriesMetadata struct {
-	Title     string    `json:"title"`
-	Chapters  []Chapter `json:"chapters"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
-type Chapter struct {
-	Title    string    `json:"title"`
-	Episodes []Episode `json:"episodes"`
-}
-
 type DownloadState struct {
 	Completed map[string]bool `json:"completed"`
 	LastSync  time.Time       `json:"last_sync"`
 }
 
-func (d *Downloader) DownloadAllByTopics() error {
-	printBox("Downloading all series organized by topics")
-
-	// Get the topics page
-	topicsURL := fmt.Sprintf("%s%s", config.LaracastsBaseUrl, "/browse/all")
-
-	req, err := http.NewRequest("GET", topicsURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %v", err)
-	}
-
-	for k, v := range config.DefaultHeaders {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := d.Client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed request: %v", err)
-	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			printBox("Failed to close response body")
-		}
-	}(resp.Body)
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %v", err)
-	}
-
-	// Updated regex to match topic cards in the HTML
-	re := regexp.MustCompile(`<div class="topic-card[^"]*">.*?<a[^>]+href="([^"]+)"[^>]*>.*?<h2[^>]*>([^<]+)</h2>.*?<div class="text-left text-3xs[^"]*">(\d+)\s+Series.*?</div>`)
-	matches := re.FindAllStringSubmatch(string(body), -1)
-
-	var topics []struct {
-		URL         string
-		Title       string
-		SeriesCount int
-	}
-
-	for _, match := range matches {
-		if len(match) >= 4 {
-			seriesCount := 0
-			_, err := fmt.Sscanf(match[3], "%d", &seriesCount)
-			if err != nil {
-				return err
-			}
-
-			topics = append(topics, struct {
-				URL         string
-				Title       string
-				SeriesCount int
-			}{
-				URL:         match[1],
-				Title:       strings.TrimSpace(match[2]),
-				SeriesCount: seriesCount,
-			})
-		}
-	}
-
-	if len(topics) == 0 {
-		// Save HTML for debugging
-		debugFile := "debug_browse_page.html"
-		if err := os.WriteFile(debugFile, body, 0644); err == nil {
-			fmt.Printf("Saved HTML content to %s for debugging\n", debugFile)
-		}
-		return fmt.Errorf("no topics found in page")
-	}
-
-	fmt.Printf("\nFound %d topics to process:\n", len(topics))
-	for i, topic := range topics {
-		fmt.Printf("%d. %s (%d series)\n", i+1, topic.Title, topic.SeriesCount)
-	}
-
-	// Process each topic
-	var wg sync.WaitGroup
-	sem := make(chan bool, 4) // Limit concurrent topics
-	var mu sync.Mutex
-	var (
-		completedTopics int32
-		failedTopics    int32
-	)
-
-	for i, topic := range topics {
-		wg.Add(1)
-		sem <- true // Acquire semaphore
-
-		go func(idx int, topic struct {
-			URL         string
-			Title       string
-			SeriesCount int
-		}) {
-			defer wg.Done()
-			defer func() { <-sem }() // Release semaphore
-
-			// Create topic directory
-			topicDir := filepath.Join(d.BasePath, "topics", sanitizeFilename(topic.Title))
-			if err := os.MkdirAll(topicDir, 0755); err != nil {
-				mu.Lock()
-				fmt.Printf("❌ Error creating directory for topic '%s': %v\n", topic.Title, err)
-				mu.Unlock()
-				atomic.AddInt32(&failedTopics, 1)
-				return
-			}
-
-			mu.Lock()
-			fmt.Printf("\n[%d/%d] 📚 Processing topic: %s\n", idx+1, len(topics), topic.Title)
-			mu.Unlock()
-
-			// Get series for this topic
-			series, err := d.getTopicSeries(topic.URL)
-			if err != nil {
-				mu.Lock()
-				fmt.Printf("❌ Error getting series for topic '%s': %v\n", topic.Title, err)
-				mu.Unlock()
-				atomic.AddInt32(&failedTopics, 1)
-				return
-			}
-
-			// Create a summary file for the topic
-			summaryPath := filepath.Join(topicDir, "summary.txt")
-			summaryContent := fmt.Sprintf("Topic: %s\nTotal Series: %d\n\nSeries List:\n", topic.Title, len(series))
-
-			// Download each series
-			for j, s := range series {
-				seriesDir := filepath.Join(topicDir, sanitizeFilename(s.Title))
-
-				// Override BasePath temporarily for this series
-				originalBasePath := d.BasePath
-				d.BasePath = cleanSeriesSlug(seriesDir)
-
-				if err := d.DownloadSeries(s.Slug); err != nil {
-					mu.Lock()
-					fmt.Printf("❌ Error downloading series '%s': %v\n", s.Title, err)
-					mu.Unlock()
-
-					// Add to summary
-					summaryContent += fmt.Sprintf("%d. %s (Failed: %v)\n", j+1, s.Title, err)
-					continue
-				}
-
-				// Restore original BasePath
-				d.BasePath = originalBasePath
-
-				// Add successful series to summary
-				summaryContent += fmt.Sprintf("%d. %s (Downloaded)\n", j+1, s.Title)
-			}
-
-			// Write summary file
-			if err := os.WriteFile(summaryPath, []byte(summaryContent), 0644); err != nil {
-				mu.Lock()
-				fmt.Printf("⚠️ Error writing summary for topic '%s': %v\n", topic.Title, err)
-				mu.Unlock()
-			}
-
-			atomic.AddInt32(&completedTopics, 1)
-			mu.Lock()
-			fmt.Printf("✅ Completed topic: %s\n", topic.Title)
-			fmt.Printf("\nProgress: %.1f%% (%d/%d) Topics Completed\n",
-				float64(atomic.LoadInt32(&completedTopics))/float64(len(topics))*100,
-				atomic.LoadInt32(&completedTopics),
-				len(topics))
-			mu.Unlock()
-
-		}(i, topic)
-	}
-
-	wg.Wait()
-
-	// Print summary
-	completed := atomic.LoadInt32(&completedTopics)
-	failed := atomic.LoadInt32(&failedTopics)
-
-	fmt.Printf("\n🎉 Download Summary:\n")
-	fmt.Printf("Total Topics Found: %d\n", len(topics))
-	fmt.Printf("Topics Completed: %d\n", completed)
-	fmt.Printf("Topics Failed: %d\n", failed)
-
-	// Create a global summary file
-	globalSummaryPath := filepath.Join(d.BasePath, "topics", "download_summary.txt")
-	globalSummaryContent := fmt.Sprintf(`Download Summary
-===============
-Date: %s
-Total Topics: %d
-Completed Topics: %d
-Failed Topics: %d
-`, time.Now().Format("2006-01-02 15:04:05"), len(topics), completed, failed)
-
-	if err := os.WriteFile(globalSummaryPath, []byte(globalSummaryContent), 0644); err != nil {
-		fmt.Printf("⚠️ Error writing global summary: %v\n", err)
-	}
-
-	if failed > 0 {
-		return fmt.Errorf("%d topics failed to process", failed)
-	}
-
-	return nil
+// Add this new struct to the top of series.go
+type TopicSeries struct {
+	Title     string `json:"title"`
+	Slug      string `json:"slug"`
+	Path      string `json:"path"`
+	TopicPath string `json:"topic_path"`
+	TopicName string `json:"topic_name"`
 }
 
-// Helper for the getTopicSeries function
-func (d *Downloader) getTopicSeries(topicURL string) ([]struct {
-	Title string
-	Slug  string
-}, error) {
+func (d *Downloader) getTopicSeries(topicURL string, topicName string) ([]TopicSeries, error) {
+	fmt.Printf("Fetching series from: %s\n", topicURL)
+
 	req, err := http.NewRequest("GET", topicURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
@@ -252,65 +48,617 @@ func (d *Downloader) getTopicSeries(topicURL string) ([]struct {
 	if err != nil {
 		return nil, fmt.Errorf("failed request: %v", err)
 	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			print("Failed to close response body")
-		}
-	}(resp.Body)
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("topic page not found (404)")
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %v", err)
 	}
 
-	// Look for series cards in the HTML
-	seriesRe := regexp.MustCompile(`<a[^>]+href="/series/([^"]+)"[^>]*>.*?<h2[^>]*>([^<]+)</h2>`)
-	matches := seriesRe.FindAllStringSubmatch(string(body), -1)
+	// Parse page data
+	var pageData struct {
+		Props struct {
+			Topic struct {
+				Name   string `json:"name"`
+				Path   string `json:"path"`
+				Series []struct {
+					ID           int    `json:"id"`
+					Title        string `json:"title"`
+					Path         string `json:"path"`
+					Slug         string `json:"slug"`
+					EpisodeCount int    `json:"episodeCount"`
+					Topics       []struct {
+						Name string `json:"name"`
+						Path string `json:"path"`
+					} `json:"topics"`
+				} `json:"series"`
+			} `json:"topic"`
+		} `json:"props"`
+	}
 
-	seriesMap := make(map[string]struct {
-		Title string
-		Slug  string
-	})
+	jsonData := extractPageJSON(body)
+	if jsonData == "" {
+		return nil, fmt.Errorf("no page data found")
+	}
 
-	for _, match := range matches {
-		if len(match) >= 3 {
-			slug := match[1]
-			title := html.UnescapeString(strings.TrimSpace(match[2]))
+	if err := json.Unmarshal([]byte(jsonData), &pageData); err != nil {
+		return nil, fmt.Errorf("failed to parse page data: %v", err)
+	}
 
-			// Ensure unique entries
-			seriesMap[slug] = struct {
-				Title string
-				Slug  string
-			}{
-				Title: title,
-				Slug:  fmt.Sprintf("series/%s", slug),
+	var series []TopicSeries
+	downloadedSlugs := make(map[string]bool)
+
+	// Process series that are directly listed under this topic
+	for _, s := range pageData.Props.Topic.Series {
+		if s.Title == "" || downloadedSlugs[s.Slug] {
+			continue
+		}
+
+		// Get the clean slug
+		slug := s.Slug
+		if s.Path != "" {
+			slug = strings.TrimPrefix(s.Path, "/series/")
+		}
+
+		// Ensure proper series slug format
+		if !strings.HasPrefix(slug, "series/") {
+			slug = fmt.Sprintf("series/%s", slug)
+		}
+
+		series = append(series, TopicSeries{
+			Title:     s.Title,
+			Slug:      slug,
+			Path:      s.Path,
+			TopicPath: pageData.Props.Topic.Path,
+			TopicName: topicName,
+		})
+
+		downloadedSlugs[s.Slug] = true
+		fmt.Printf("Found series for topic %s: %s (slug: %s)\n",
+			topicName, s.Title, slug)
+	}
+
+	if len(series) == 0 {
+		return nil, fmt.Errorf("no series found for topic '%s'", topicName)
+	}
+
+	fmt.Printf("Successfully found %d series for topic '%s'\n",
+		len(series), topicName)
+	return series, nil
+}
+
+type SeriesMetadata struct {
+	Title     string    `json:"title"`
+	Chapters  []Chapter `json:"chapters"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type Chapter struct {
+	Title    string    `json:"title"`
+	Episodes []Episode `json:"episodes"`
+}
+
+// Helper function to get consistent folder names
+func getSeriesFolderName(series TopicSeries) string {
+	// Use the series title for folder name, properly sanitized
+	folderName := sanitizeFilename(series.Title)
+
+	// Convert to lowercase
+	folderName = strings.ToLower(folderName)
+
+	// Replace multiple dashes with single dash
+	folderName = regexp.MustCompile(`-+`).ReplaceAllString(folderName, "-")
+
+	// Trim dashes from start and end
+	folderName = strings.Trim(folderName, "-")
+
+	return folderName
+}
+
+// Main function to handle series download
+func (d *Downloader) handleSeriesDownload(topicsDir string, series TopicSeries, downloadedSeries map[string]string) error {
+	// Get consistent folder name for the topic and series
+	topicFolderName := sanitizeFilename(series.TopicName)
+	seriesFolderName := getSeriesFolderName(series)
+
+	// Create full path using consistent naming
+	// This now creates: topics/topic-name/series-name
+	seriesDir := filepath.Join(topicsDir, topicFolderName, seriesFolderName)
+
+	// Check if this series has already been downloaded to another topic
+	if existingPath, exists := downloadedSeries[series.Slug]; exists {
+		fmt.Printf("Series '%s' already exists at '%s', creating symlink...\n",
+			series.Title, existingPath)
+
+		// Create parent directory if it doesn't exist
+		if err := os.MkdirAll(filepath.Dir(seriesDir), 0755); err != nil {
+			return fmt.Errorf("failed to create directory: %v", err)
+		}
+
+		// Create relative symlink
+		relPath, err := filepath.Rel(filepath.Dir(seriesDir), existingPath)
+		if err != nil {
+			return fmt.Errorf("failed to create relative path: %v", err)
+		}
+
+		// Remove existing symlink or folder if it exists
+		if _, err := os.Lstat(seriesDir); err == nil {
+			os.RemoveAll(seriesDir)
+		}
+
+		if err := os.Symlink(relPath, seriesDir); err != nil {
+			return fmt.Errorf("failed to create symlink: %v", err)
+		}
+
+		return nil
+	}
+
+	// This is the first time we're downloading this series
+	if err := os.MkdirAll(seriesDir, 0755); err != nil {
+		return fmt.Errorf("failed to create series directory: %v", err)
+	}
+
+	// Set BasePath to the series directory
+	d.BasePath = seriesDir
+
+	// Download series content directly to the folder
+	if err := d.downloadSeriesContent(series.Slug); err != nil {
+		return fmt.Errorf("failed to download series: %v", err)
+	}
+
+	// Record this series as downloaded
+	downloadedSeries[series.Slug] = seriesDir
+
+	return nil
+}
+
+// Function to download series content without creating extra directories
+func (d *Downloader) downloadSeriesContent(seriesSlug string) error {
+	// Get series metadata
+	var seriesData SeriesMetadata
+	cacheKey := fmt.Sprintf("series_%s", strings.TrimPrefix(seriesSlug, "series/"))
+
+	found, err := d.Cache.Get(cacheKey, &seriesData)
+	if err != nil {
+		fmt.Printf("Cache error: %v, fetching fresh data\n", err)
+		found = false
+	}
+
+	if !found || d.Cache.IsStale(cacheKey, 3600*24*7) {
+		// Fetch and parse series data
+		seriesURL := fmt.Sprintf("%s/%s", config.LaracastsBaseUrl, seriesSlug)
+		jsonData, err := d.fetchSeriesData(seriesURL)
+		if err != nil {
+			return fmt.Errorf("failed to fetch series data: %v", err)
+		}
+
+		var rawData struct {
+			Props struct {
+				Series struct {
+					Title    string `json:"title"`
+					Chapters []struct {
+						Title    string `json:"title"`
+						Episodes []struct {
+							Title    string `json:"title"`
+							VimeoId  string `json:"vimeoId"`
+							Position int    `json:"position"`
+						} `json:"episodes"`
+					} `json:"chapters"`
+				} `json:"series"`
+			} `json:"props"`
+		}
+
+		if err := json.Unmarshal([]byte(jsonData), &rawData); err != nil {
+			return fmt.Errorf("failed to parse series data: %v", err)
+		}
+
+		// Convert to metadata structure
+		seriesData = SeriesMetadata{
+			Title:     rawData.Props.Series.Title,
+			UpdatedAt: time.Now(),
+		}
+
+		for _, chapter := range rawData.Props.Series.Chapters {
+			var episodes []Episode
+			for _, ep := range chapter.Episodes {
+				if ep.VimeoId != "" {
+					episodes = append(episodes, Episode{
+						Title:   ep.Title,
+						VimeoId: ep.VimeoId,
+						Number:  ep.Position,
+					})
+				}
 			}
+
+			seriesData.Chapters = append(seriesData.Chapters, Chapter{
+				Title:    chapter.Title,
+				Episodes: episodes,
+			})
+		}
+
+		// Cache the series metadata
+		if err := d.Cache.Set(cacheKey, seriesData); err != nil {
+			fmt.Printf("Warning: Failed to cache series metadata: %v\n", err)
 		}
 	}
 
-	// Convert map to slice
+	// Create worker pool for episode downloads
+	jobs := make(chan struct {
+		episode   Episode
+		outputDir string
+	}, JobBufferSize)
+	results := make(chan struct {
+		episode Episode
+		err     error
+	}, ResultsBufferSize)
+
+	// Start workers
+	var wg sync.WaitGroup
+	for w := 1; w <= MaxEpisodeWorkers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for job := range jobs {
+				fmt.Printf("\nWorker %d starting download: Episode %d - %s\n",
+					id, job.episode.Number, job.episode.Title)
+
+				err := d.downloadEpisode(job.outputDir, job.episode)
+				time.Sleep(time.Millisecond)
+
+				if err != nil {
+					fmt.Printf("❌ Worker %d failed episode %d: %v\n",
+						id, job.episode.Number, err)
+				} else {
+					fmt.Printf("✅ Worker %d completed episode %d: %s\n",
+						id, job.episode.Number, job.episode.Title)
+				}
+
+				results <- struct {
+					episode Episode
+					err     error
+				}{job.episode, err}
+			}
+		}(w)
+	}
+
+	// Send jobs to workers
+	totalEpisodes := 0
+	for _, chapter := range seriesData.Chapters {
+		fmt.Printf("\nChapter: %s\n", chapter.Title)
+		for _, episode := range chapter.Episodes {
+			totalEpisodes++
+			jobs <- struct {
+				episode   Episode
+				outputDir string
+			}{episode, d.BasePath}
+		}
+	}
+	close(jobs)
+
+	// Wait for all workers
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Process results
+	var failures int32
+	var successCount int32
+	for result := range results {
+		if result.err != nil {
+			atomic.AddInt32(&failures, 1)
+		} else {
+			atomic.AddInt32(&successCount, 1)
+		}
+
+		completed := atomic.LoadInt32(&successCount) + atomic.LoadInt32(&failures)
+		fmt.Printf("\rProgress: %.1f%% (%d/%d) ✅ Success: %d ❌ Failed: %d",
+			float64(completed)/float64(totalEpisodes)*100,
+			completed, totalEpisodes,
+			atomic.LoadInt32(&successCount),
+			atomic.LoadInt32(&failures))
+	}
+
+	fmt.Println() // New line after progress bar
+
+	if failures > 0 {
+		return fmt.Errorf("%d episodes failed to download", failures)
+	}
+
+	return nil
+}
+
+// Update the sanitizeFilename function to be more consistent
+func sanitizeFilename(filename string) string {
+	// Convert to lowercase
+	filename = strings.ToLower(filename)
+
+	// Replace spaces and invalid characters with dashes
+	invalids := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "}
+	result := filename
+
+	for _, char := range invalids {
+		result = strings.ReplaceAll(result, char, "-")
+	}
+
+	// Replace multiple dashes with single dash
+	result = regexp.MustCompile(`-+`).ReplaceAllString(result, "-")
+
+	// Trim dashes from start and end
+	result = strings.Trim(result, "-")
+
+	return result
+}
+
+func extractPageJSON(body []byte) string {
+	// First try finding script tag with page data
+	scriptRe := regexp.MustCompile(`<script\s+id="page-data"\s+type="application/json"[^>]*>(.*?)</script>`)
+	matches := scriptRe.FindSubmatch(body)
+
+	if len(matches) > 1 {
+		return html.UnescapeString(string(matches[1]))
+	}
+
+	// Try data-page attribute as fallback
+	dataPageRe := regexp.MustCompile(`data-page="([^"]+)"`)
+	matches = dataPageRe.FindSubmatch(body)
+	if len(matches) > 1 {
+		return html.UnescapeString(string(matches[1]))
+	}
+
+	return ""
+}
+
+func (d *Downloader) DownloadAllByTopics() error {
+	printBox("Downloading all series organized by topics")
+
+	// Store original base path
+	originalBasePath := d.BasePath
+
+	// Create tracking map for downloaded series
+	downloadedSeries := make(map[string]string) // maps series slug to its directory
+	var downloadMutex sync.Mutex
+
+	// Get the browse page with retries
+	var body []byte
+	var err error
+	maxRetries := 3
+
+	browseURL := fmt.Sprintf("%s/browse/all", config.LaracastsBaseUrl)
+	for i := 0; i < maxRetries; i++ {
+		req, err := http.NewRequest("GET", browseURL, nil)
+		if err != nil {
+			continue
+		}
+
+		for k, v := range config.DefaultHeaders {
+			req.Header.Set(k, v)
+		}
+
+		resp, err := d.Client.Do(req)
+		if err != nil {
+			time.Sleep(time.Second * time.Duration(i+1))
+			continue
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Second * time.Duration(i+1))
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to fetch browse page after %d attempts: %v", maxRetries, err)
+	}
+
+	// Parse the page data
+	jsonData := extractPageJSON(body)
+	if jsonData == "" {
+		return fmt.Errorf("no page data found")
+	}
+
+	var pageDataStruct struct {
+		Props struct {
+			Topics []struct {
+				Name         string `json:"name"`
+				EpisodeCount int    `json:"episode_count"`
+				SeriesCount  int    `json:"series_count"`
+				Path         string `json:"path"`
+			} `json:"topics"`
+		} `json:"props"`
+	}
+
+	if err := json.Unmarshal([]byte(jsonData), &pageDataStruct); err != nil {
+		return fmt.Errorf("failed to parse JSON data: %v", err)
+	}
+
+	// Create topics directory
+	topicsDir := filepath.Join(originalBasePath, "topics")
+	if err := os.MkdirAll(topicsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create topics directory: %v", err)
+	}
+
+	// Process each topic
+	var wg sync.WaitGroup
+	sem := make(chan bool, 4) // Limit concurrent topics
+	var mu sync.Mutex
+	var (
+		completedTopics int32
+		failedTopics    int32
+	)
+
+	for i, topic := range pageDataStruct.Props.Topics {
+		wg.Add(1)
+		sem <- true // Acquire semaphore
+
+		go func(idx int, topic struct {
+			Name         string
+			EpisodeCount int
+			SeriesCount  int
+			Path         string
+		}) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release semaphore
+
+			// Add delay between topics
+			time.Sleep(time.Second * 2)
+
+			mu.Lock()
+			fmt.Printf("\n[%d/%d] 📚 Processing topic: %s\n",
+				idx+1, len(pageDataStruct.Props.Topics), topic.Name)
+			mu.Unlock()
+
+			// Get series for this topic
+			series, err := d.getTopicSeries(topic.Path, topic.Name)
+			if err != nil {
+				mu.Lock()
+				fmt.Printf("❌ Error getting series for topic '%s': %v\n", topic.Name, err)
+				mu.Unlock()
+				atomic.AddInt32(&failedTopics, 1)
+				return
+			}
+
+			// Download each series
+			var topicFailures int32
+			for _, s := range series {
+				downloadMutex.Lock()
+				err := d.handleSeriesDownload(topicsDir, s, downloadedSeries)
+				downloadMutex.Unlock()
+
+				if err != nil {
+					mu.Lock()
+					fmt.Printf("❌ Error processing series '%s': %v\n", s.Title, err)
+					mu.Unlock()
+					atomic.AddInt32(&topicFailures, 1)
+				}
+			}
+
+			if topicFailures > 0 {
+				atomic.AddInt32(&failedTopics, 1)
+			} else {
+				atomic.AddInt32(&completedTopics, 1)
+			}
+
+			mu.Lock()
+			fmt.Printf("✅ Completed topic: %s\n", topic.Name)
+			fmt.Printf("\nProgress: %.1f%% (%d/%d) Topics Completed\n",
+				float64(atomic.LoadInt32(&completedTopics))/float64(len(pageDataStruct.Props.Topics))*100,
+				atomic.LoadInt32(&completedTopics),
+				len(pageDataStruct.Props.Topics))
+			mu.Unlock()
+
+		}(i, struct {
+			Name         string
+			EpisodeCount int
+			SeriesCount  int
+			Path         string
+		}(topic))
+	}
+
+	wg.Wait()
+
+	// Save download mapping for debugging
+	downloadMap := filepath.Join(topicsDir, "series_locations.json")
+	if mapData, err := json.MarshalIndent(downloadedSeries, "", "  "); err == nil {
+		_ = os.WriteFile(downloadMap, mapData, 0644)
+	}
+
+	// Restore original BasePath
+	d.BasePath = originalBasePath
+
+	// Print summary
+	completed := atomic.LoadInt32(&completedTopics)
+	failed := atomic.LoadInt32(&failedTopics)
+
+	fmt.Printf("\n🎉 Download Summary:\n")
+	fmt.Printf("Total Topics Found: %d\n", len(pageDataStruct.Props.Topics))
+	fmt.Printf("Topics Completed: %d\n", completed)
+	fmt.Printf("Topics Failed: %d\n", failed)
+
+	if failed > 0 {
+		return fmt.Errorf("%d topics failed to process", failed)
+	}
+
+	return nil
+}
+func (d *Downloader) extractSeriesFromJSON(body []byte, topicName string) ([]struct {
+	Title string
+	Slug  string
+}, error) {
+	// Try to find the page data in JSON
+	var jsonData string
+
+	// First try the script tag
+	scriptRe := regexp.MustCompile(`<script\s+id="page-data"\s+type="application/json"[^>]*>(.*?)</script>`)
+	if matches := scriptRe.FindSubmatch(body); len(matches) > 1 {
+		jsonData = html.UnescapeString(string(matches[1]))
+	} else {
+		// Try data-page attribute as fallback
+		dataPageRe := regexp.MustCompile(`data-page="([^"]+)"`)
+		if matches := dataPageRe.FindSubmatch(body); len(matches) > 1 {
+			jsonData = html.UnescapeString(string(matches[1]))
+		}
+	}
+
+	if jsonData == "" {
+		return nil, fmt.Errorf("no series data found in page")
+	}
+
+	var pageDataStruct struct {
+		Props struct {
+			Topic struct {
+				Series []struct {
+					Title string `json:"title"`
+					Path  string `json:"path"`
+					Slug  string `json:"slug"`
+				} `json:"series"`
+			} `json:"topic"`
+		} `json:"props"`
+	}
+
+	if err := json.Unmarshal([]byte(jsonData), &pageDataStruct); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON data: %v", err)
+	}
+
 	var series []struct {
 		Title string
 		Slug  string
 	}
 
-	for _, s := range seriesMap {
-		series = append(series, s)
+	for _, s := range pageDataStruct.Props.Topic.Series {
+		if s.Title == "" {
+			continue
+		}
+
+		slug := s.Slug
+		if s.Path != "" {
+			slug = strings.TrimPrefix(s.Path, "/series/")
+		}
+
+		// Ensure slug has "series/" prefix
+		if !strings.HasPrefix(slug, "series/") {
+			slug = fmt.Sprintf("series/%s", slug)
+		}
+
+		series = append(series, struct {
+			Title string
+			Slug  string
+		}{
+			Title: strings.TrimSpace(s.Title),
+			Slug:  strings.TrimSpace(slug),
+		})
+
+		fmt.Printf("Found series (from JSON): %s (slug: %s)\n", s.Title, slug)
 	}
 
 	if len(series) == 0 {
-		// Save HTML for debugging
-		debugFile := "debug_topic_page.html"
-		if err := os.WriteFile(debugFile, body, 0644); err == nil {
-			fmt.Printf("Saved HTML content to %s for debugging\n", debugFile)
-		}
 		return nil, fmt.Errorf("no series found in topic page")
-	}
-
-	fmt.Printf("\nFound %d series in topic\n", len(series))
-	for i, s := range series {
-		fmt.Printf("%d. %s (%s)\n", i+1, s.Title, s.Slug)
 	}
 
 	return series, nil

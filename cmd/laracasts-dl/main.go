@@ -74,6 +74,7 @@ func main() {
 	flag.BoolVar(&noCache, "no-cache", false, "Ignore cache and download fresh")
 	flag.IntVar(&workers, "workers", 15, "Number of concurrent downloads (default: 15)")
 	flag.IntVar(&chunkSize, "chunk-size", 20, "Chunk size in MB (default: 20)")
+	downloadBits := flag.Bool("b", false, "Download all Laracasts bits")
 
 	// Parse flags
 	flag.Parse()
@@ -123,6 +124,14 @@ func main() {
 		}
 	})
 
+	if *downloadBits {
+		if err := dl.DownloadAllBits(); err != nil {
+			fmt.Printf("Error downloading bits: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Handle downloads based on flag state
 	var downloadErr error
 	if isFlagProvided && seriesFlag != "" {
@@ -134,7 +143,7 @@ func main() {
 		// 1. No -s flag was provided at all
 		// 2. -s flag was provided but empty (-s "")
 		fmt.Println("No series specified, downloading all series...")
-		downloadErr = dl.DownloadAllSeries()
+		downloadErr = dl.DownloadAllByTopics()
 	}
 
 	if downloadErr != nil {

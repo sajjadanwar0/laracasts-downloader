@@ -148,17 +148,6 @@ func (d *Downloader) tryDownload(outputDir string, episode Episode) error {
 	return d.Vimeo.DownloadVideo(videoConfig, outputPath)
 }
 
-func sanitizeFilename(filename string) string {
-	invalids := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"}
-	result := filename
-
-	for _, char := range invalids {
-		result = strings.ReplaceAll(result, char, "-")
-	}
-
-	return strings.TrimSpace(result)
-}
-
 func printBox(text string) {
 	width := len(text) + 4
 	line := strings.Repeat("=", width)
