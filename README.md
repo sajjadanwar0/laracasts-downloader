@@ -46,15 +46,16 @@ downloads/
 
 ## Usage
 
-1. Set your environment variables:
-```bash
-export EMAIL=your@email.com
-export PASSWORD=your_password
-export DOWNLOAD_PATH=/path/to/downloads
-export VIDEO_QUALITY=1080p  # Options: 360p, 540p, 720p, 1080p
-```
+1. ```bash
+   cp .env.example .env
+   ```
+2. Set your environment variables in .env
+   EMAIL=your@email.com
+   PASSWORD=your_password
+   DOWNLOAD_PATH=/path/to/downloads
+   VIDEO_QUALITY=1080p  # Options: 360p, 540p, 720p, 1080p
 
-2. Run the downloader:
+3. Run the downloader:
 ```bash
 go run main.go
 ```
