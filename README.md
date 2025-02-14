@@ -1,6 +1,6 @@
-# Laracasts Series Downloader
+# Laracasts  Downloader
 
-A robust Go application that downloads Laracasts series, organizing them by topics and maintaining a clean directory structure.
+A robust Go application that downloads Laracasts topics, series and bits.
 
 ## Features
 
@@ -65,6 +65,7 @@ The application will:
 3. Create topic directories
 4. Download all series for each topic
 5. Generate summary files
+6. To download series pass the series flag with slug of series no qoutes like `go run main.go -s the-definition-series`
 
 ## Configuration
 
@@ -73,7 +74,7 @@ The downloader supports several configuration options:
 - **Concurrent Downloads**: Controls how many downloads run in parallel
 - **Retry Attempts**: Number of retry attempts for failed downloads
 - **Buffer Sizes**: Configurable buffer sizes for optimal performance
-- **Video Quality**: Selectable video quality settings
+- **Video Quality**: Selectable video quality settings (Not fully implemented, future work)
 
 ## Dependencies
 
@@ -87,7 +88,7 @@ The downloader supports several configuration options:
 | EMAIL | Laracasts account email | Yes |
 | PASSWORD | Laracasts account password | Yes |
 | DOWNLOAD_PATH | Download directory path | Yes |
-| VIDEO_QUALITY | Preferred video quality | Yes |
+| VIDEO_QUALITY | Preferred video quality | No (Not fully working atm|
 
 ## Performance
 
@@ -118,8 +119,3 @@ Contributions are welcome! Please:
 ## License
 
 MIT License
-
-## Acknowledgments
-
-- Thanks to Laracasts for their excellent content
-- Built with Go's fantastic concurrency features
