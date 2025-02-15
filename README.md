@@ -143,8 +143,6 @@ go run main.go [options]
 
 Options:
   -s, --series string    Series slug to download
-  -t, --topic string     Topic to download
-  -q, --quality string   Video quality (360p, 540p, 720p, 1080p)
   -c, --concurrent int   Number of concurrent downloads (default 3)
   -r, --retry int        Number of retry attempts (default 3)
   -v, --verbose         Enable verbose logging
