@@ -205,13 +205,6 @@ git push origin feature/my-new-feature
 ```
 5. Submit a pull request
 
-### Development Guidelines
-
-- Follow Go best practices and style guidelines
-- Add tests for new features
-- Update documentation as needed
-- Maintain backward compatibility
-- Add comments for complex logic
 
 ## License
 
