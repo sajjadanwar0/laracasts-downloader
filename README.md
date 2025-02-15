@@ -129,23 +129,11 @@ To download a specific series, use the series flag with the slug:
 go run main.go -s the-definition-series
 ```
 
-### Download by Topic
+### Download All Topics
 
-To download all series from a specific topic:
+To download all topics:
 ```bash
-go run main.go -t laravel
-```
-
-### Advanced Options
-
-```bash
-go run main.go [options]
-
-Options:
-  -s, --series string    Series slug to download
-  -c, --concurrent int   Number of concurrent downloads (default 3)
-  -r, --retry int        Number of retry attempts (default 3)
-  -v, --verbose         Enable verbose logging
+go run main.go
 ```
 
 ## Environment Variables
