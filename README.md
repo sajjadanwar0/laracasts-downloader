@@ -2,6 +2,8 @@
 
 A robust Go application that downloads Laracasts topics, series and bits. This tool helps you organize and manage your Laracasts content offline for convenient access and learning.
 
+#### Note: This project is still in beta mode, not fully implemented yet it downloads all topics, series and bits from Laracasts.
+
 ## Features
 
 ### Topic-Based Organization
