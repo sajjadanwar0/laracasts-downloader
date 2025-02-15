@@ -79,7 +79,7 @@ choco install ffmpeg
 
 3. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/laracasts-downloader.git
+git clone https://github.com/sajjadanwar0/laracasts-downloader.git
 cd laracasts-downloader
 ```
 
