@@ -29,20 +29,19 @@ A robust Go application that downloads Laracasts topics, series and bits.
 ```
 downloads/
 ├── topics/
-│   ├── download_summary.txt
 │   ├── Laravel/
-│   │   ├── summary.txt
 │   │   ├── Laravel Basics/
 │   │   │   └── (series files)
 │   │   └── Advanced Laravel/
 │   │       └── (series files)
 │   ├── Vue/
-│   │   ├── summary.txt
 │   │   └── (series directories)
 │   └── Testing/
-│       ├── summary.txt
 │       └── (series directories)
-```
+├── .cache/
+│   │   ├── downloads
+│   │   └── series
+│   │   └── state
 
 ## Usage
 
