@@ -45,9 +45,7 @@ downloads/
 
 ## Usage
 
-1. ```bash
-   cp .env.example .env
-   ```
+1. ```cp .env.example .env```
 2. Set your environment variables in .env
 
    ```
