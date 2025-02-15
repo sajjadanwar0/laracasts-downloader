@@ -213,10 +213,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Support
 
 For support, please:
-1. Check the [Issues](https://github.com/yourusername/laracasts-downloader/issues) page
-2. Create a new issue if your problem isn't already reported
-3. Provide detailed information about your problem
-4. Include relevant logs and configuration
+1. Create a new issue if your problem isn't already reported
+2. Provide detailed information about your problem
+3. Include relevant logs and configuration
 
 ## Disclaimer
 
