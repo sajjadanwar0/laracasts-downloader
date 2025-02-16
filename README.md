@@ -218,7 +218,3 @@ For support, please:
 1. Create a new issue if your problem isn't already reported
 2. Provide detailed information about your problem
 3. Include relevant logs and configuration
-
-## Disclaimer
-
-This tool is for personal use only. Please respect Laracasts' terms of service and only download content you have access to through a valid subscription.
