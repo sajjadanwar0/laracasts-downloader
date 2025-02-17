@@ -102,10 +102,7 @@ cp .env.example .env
 EMAIL=your@email.com
 PASSWORD=your_password
 DOWNLOAD_PATH=/path/to/downloads
-VIDEO_QUALITY=1080p  # Options: 360p, 540p, 720p, 1080p
-CONCURRENT_DOWNLOADS=3
-RETRY_ATTEMPTS=3
-BUFFER_SIZE=8192
+
 ```
 
 ## Usage
@@ -145,10 +142,6 @@ go run main.go
 | EMAIL | Laracasts account email | Yes | - |
 | PASSWORD | Laracasts account password | Yes | - |
 | DOWNLOAD_PATH | Download directory path | Yes | - |
-| VIDEO_QUALITY | Preferred video quality | No | 1080p |
-| CONCURRENT_DOWNLOADS | Number of parallel downloads | No | 3 |
-| RETRY_ATTEMPTS | Number of download retry attempts | No | 3 |
-| BUFFER_SIZE | Download buffer size in bytes | No | 8192 |
 
 ## Performance Optimization
 
