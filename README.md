@@ -109,7 +109,10 @@ DOWNLOAD_PATH=/path/to/downloads
 
 ### Basic Usage
 
-Run the downloader to fetch all available content:
+1. Navigate to the `cmd/laracasts-dl` folder using 
+`cd cmd/laracasts-dl`
+
+2. Run the downloader to fetch all available content:
 ```bash
 go run main.go
 ```
